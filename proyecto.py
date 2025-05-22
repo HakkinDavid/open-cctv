@@ -21,8 +21,6 @@ imagery = {
     "warn": cv2.imread("warn.png")
 }
 
-tasked_by_users = []
-
 tasks_for_users = {}
 
 @client.event
@@ -52,27 +50,25 @@ async def on_message(message):
 
     try:
         dm_channel = await message.author.create_dm()
-        try:
-            tasked_by_users.index(message.author.id)
-            if message.content == 'finalizar' or message.content == 'terminé':
-                tasked_by_users.remove(message.author.id)
-                tasks_for_users[message.author.id].cancel()
-                delattr(tasks_for_users, message.author.id)
+        if message.content == 'finalizar' or message.content == 'terminé':
+            try:
+                tasks_for_users[str(message.author.id)].cancel()
+                delattr(tasks_for_users, str(message.author.id))
                 await dm_channel.send(
                     f"Finalicé la vigilancia para tu hogar."
                 )
-            else:
-                await dm_channel.send(
-                    f"Ya me encuentro monitoreando tu hogar y no puedo abrir otra sesión. Si deseas terminar la actual, escribe \"finalizar\" o \"terminé\"."
-                )
+            except:
+                print("Comprobamos que el usuario no tiene vigilancia activa.")
             return
-        except:
-            print("Comprobamos que el usuario no tiene vigilancia activa.")
-        if ip_a_vigilar:
+        elif (hasattr(tasks_for_users, str(message.author.id))):
+            await dm_channel.send(
+                f"Ya me encuentro monitoreando tu hogar y no puedo abrir otra sesión. Si deseas terminar la actual, escribe \"finalizar\" o \"terminé\"."
+            )
+        elif ip_a_vigilar:
             await dm_channel.send(
                 f"Hola {message.author.name}. Con gusto monitoreo tu hogar."
             )
-            tasks_for_users[message.author.id] = asyncio.create_task(vigilar(ip_a_vigilar, message.author.id))
+            tasks_for_users[str(message.author.id)] = asyncio.create_task(vigilar(ip_a_vigilar, message.author.id))
         else:
             await dm_channel.send("No encontré una IP válida en tu mensaje.")
     except discord.Forbidden:
@@ -127,7 +123,6 @@ ultima_notificacion_por_usuario = {}
 intervalo_min_notificacion = timedelta(seconds=30)
 
 async def vigilar(video_ip, user_id):
-    tasked_by_users.append(user_id)
     # --- Parámetros Configurables ---
     VIDEO_SOURCE = video_ip
     RESIZE_WIDTH = 640
@@ -178,7 +173,6 @@ async def vigilar(video_ip, user_id):
     if not cap.isOpened():
         print(f"Error: No se pudo abrir el stream de video desde {VIDEO_SOURCE}")
         await notificar(user_id=user_id, text="No se pudo abrir el stream de video. La cámara podría estar apagada o mal configurada.", image=imagery["warn"])
-        tasked_by_users.remove(user_id)
         return
             
 
@@ -193,7 +187,6 @@ async def vigilar(video_ip, user_id):
         print("Error: No se pudo leer el primer frame del video.")
         await notificar(user_id=user_id, text="No se pudo leer el primer frame del video. Verifica la conexión con la cámara.", image=imagery["warn"])
         cap.release()
-        tasked_by_users.remove(user_id)
         return
     
     frame_height_orig, frame_width_orig = frame_anterior.shape[:2]
@@ -434,7 +427,7 @@ async def vigilar(video_ip, user_id):
 
         frame_anterior_gray = frame_gray_motion
         cv2.imshow("Video en Tiempo Real - Deteccion de Siluetas", frame_display)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(1) and 0xFF == ord('q'):
             print("Saliendo...")
             break
 
