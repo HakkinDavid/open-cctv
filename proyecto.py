@@ -90,29 +90,62 @@ def extraer_ip(texto):
         return f"http://{ip}:{puerto}/video"
     return None
 
-def ajuste_iluminacion(image):
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    lab = cv2.merge((l, a, b))
-    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-
-def contraste(image):
-    alpha = 1.5  # Contraste (1.0-3.0)
-    beta = 30    # Brillo (-100 a 100)
-    return cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
-
+# --- Funciones de Preprocesamiento ---
+def filtroGaussiano(image, ksize=5):
+    return cv2.GaussianBlur(image, (ksize, ksize), 0)
+    
 def filtroBordes(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray,150,250)
     return cv2.bitwise_or(image, cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR))
 
-def filtroGaussiano(image, ksize=5):
-    return cv2.GaussianBlur(image, (ksize, ksize), 0)
+# Mejora la iluminación de un frame si el brillo promedio del canal V está por debajo de un umbral.
+# Aplica CLAHE y/o Corrección Gamma al canal V del espacio HSV.
+def mejorar_iluminacion_hsv(frame, v_threshold, apply_clahe=True, apply_gamma=True, gamma_val=1.5):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
 
-def redimension(image, size=(640, 640)):
-    return cv2.resize(image, size, interpolation=cv2.INTER_LINEAR)
+    avg_v = np.mean(v)
+    # print(f"Brillo promedio (V channel): {avg_v}") # Descomentar para depurar
+
+    if avg_v < v_threshold:
+        print(f"Detectada baja iluminación (V_avg={avg_v:.2f} < {v_threshold}). Aplicando mejoras...")
+        v_mejorado = v.copy()
+        if apply_clahe:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            v_mejorado = clahe.apply(v_mejorado)
+            print("  CLAHE aplicado al canal V.")
+        
+        if apply_gamma:
+            invGamma = 1.0 / gamma_val
+            table = np.array([((i / 255.0) ** invGamma) * 255
+                              for i in np.arange(0, 256)]).astype("uint8")
+            v_mejorado = cv2.LUT(v_mejorado, table)
+            print(f"  Corrección Gamma (valor {gamma_val}) aplicada al canal V.")
+        
+        final_hsv = cv2.merge([h, s, v_mejorado])
+        frame_mejorado = cv2.cvtColor(final_hsv, cv2.COLOR_HSV2BGR)
+        return frame_mejorado
+    else:
+        return frame # Devuelve el frame original si no se necesita mejora
+
+# Aplica operaciones morfológicas (apertura o cierre) a una máscara binaria.
+def aplicar_operaciones_morfologicas(mascara_binaria, operacion="apertura", tamano_kernel=3):
+    kernel = np.ones((tamano_kernel, tamano_kernel), np.uint8)
+    if operacion == "apertura":
+        return cv2.morphologyEx(mascara_binaria, cv2.MORPH_OPEN, kernel)
+    elif operacion == "cierre":
+        return cv2.morphologyEx(mascara_binaria, cv2.MORPH_CLOSE, kernel)
+    else: # Por defecto o si el tipo no es reconocido, devuelve la máscara original
+        return mascara_binaria
+    
+# Filtro de sharpening
+def enfocar_imagen_sharpening(frame):
+    kernel_sharpening = np.array([[-1, -1, -1],
+                                  [-1,  9, -1],
+                                  [-1, -1, -1]])
+    sharpened_frame = cv2.filter2D(frame, -1, kernel_sharpening)
+    return sharpened_frame
 
 def cv2discordfile(img):
     img_encode = cv2.imencode('.png', img)[1]
@@ -154,6 +187,22 @@ async def vigilar(video_ip, user_id):
     PROCESS_EVERY_N_FRAMES = 5 # Procesar 1 de cada N frames cuando hay movimiento. Ajusta según sea necesario.
     DRAW_LAST_KNOWN_SILHOUETTE_ON_SKIP = True # Dibujar la última silueta en frames saltados
 
+    # --- Parámetros para Mejoras de Imagen Clásicas ---
+    # 1. Mejora en Baja Luminosidad
+    APPLY_LOW_LIGHT_ENHANCEMENT = True # Poner en True para activar
+    V_CHANNEL_LOW_THRESHOLD = 80      # Umbral para el canal V (brillo) para aplicar la mejora (0-255)
+    APPLY_CLAHE_ON_V = True           # Aplicar CLAHE al canal V si está en baja luz
+    APPLY_GAMMA_ON_V = True           # Aplicar Corrección Gamma al canal V si está en baja luz
+    GAMMA_CORRECTION_VALUE = 1.5      # Valor de Gamma (ej: 1.5 para aclarar)
+
+    # 2. Operaciones Morfológicas para Máscara de Movimiento
+    APPLY_MORPHOLOGICAL_OPS = True   # Poner en True para activar
+    MORPH_OPERATION_TYPE = "apertura" # "apertura" o "cierre"
+    MORPH_KERNEL_SIZE = 3             # Tamaño del kernel (ej: 3, 5)
+
+    # 3. Sharpening (Enfoque)
+    APPLY_SHARPENING = False          # Poner en True para activar
+
     # --- Cargar Modelo YOLO ---
     try:
         model = YOLO(YOLO_MODEL_PATH)
@@ -167,10 +216,6 @@ async def vigilar(video_ip, user_id):
         if face_cascade.empty():
             print(f"Error: No se pudo cargar el clasificador de rostros de Haar desde {FACE_CASCADE_PATH}")
             DETECT_FACES = False
-
-    # --- Funciones de Preprocesamiento ---
-    def filtroGaussiano(image, ksize=5):
-        return cv2.GaussianBlur(image, (ksize, ksize), 0)
 
     # --- Inicialización de Captura de Video ---
     cap = cv2.VideoCapture(VIDEO_SOURCE)
@@ -236,10 +281,27 @@ async def vigilar(video_ip, user_id):
         else:
             frame_actual = frame_actual_orig.copy()
 
+        # --- APLICAR MEJORAS GENERALES AL FRAME ---
+        if APPLY_LOW_LIGHT_ENHANCEMENT:
+            frame_actual = mejorar_iluminacion_hsv(frame_actual, 
+                                                V_CHANNEL_LOW_THRESHOLD,
+                                                APPLY_CLAHE_ON_V,
+                                                APPLY_GAMMA_ON_V,
+                                                GAMMA_CORRECTION_VALUE)
+        
+        if APPLY_SHARPENING:
+            frame_actual = enfocar_imagen_sharpening(frame_actual)
+
         frame_display = frame_actual.copy() # Para dibujar todo
         frame_gray_motion = filtroGaussiano(cv2.cvtColor(frame_actual, cv2.COLOR_BGR2GRAY), GAUSSIAN_KSIZE)
         diferencia = cv2.absdiff(frame_anterior_gray, frame_gray_motion)
         _, umbral = cv2.threshold(diferencia, MOTION_THRESHOLD_DIFF, 255, cv2.THRESH_BINARY)
+
+         # --- APLICAR OPERACIONES MORFOLÓGICAS A LA MÁSCARA DE UMBRAL ---
+        if APPLY_MORPHOLOGICAL_OPS:
+            umbral = aplicar_operaciones_morfologicas(umbral, 
+                                                    MORPH_OPERATION_TYPE, 
+                                                    MORPH_KERNEL_SIZE)
         contornos, _ = cv2.findContours(umbral, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         hay_movimiento_general = any(cv2.contourArea(c) > MOTION_MIN_AREA for c in contornos)
