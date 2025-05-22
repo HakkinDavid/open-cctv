@@ -23,6 +23,8 @@ imagery = {
 
 tasked_by_users = []
 
+tasks_for_users = {}
+
 @client.event
 async def on_ready():
     print(f'OpenCCTV está listo como {client.user}')
@@ -54,6 +56,8 @@ async def on_message(message):
             tasked_by_users.index(message.author.id)
             if message.content == 'finalizar' or message.content == 'terminé':
                 tasked_by_users.remove(message.author.id)
+                tasks_for_users[message.author.id].cancel()
+                delattr(tasks_for_users, message.author.id)
                 await dm_channel.send(
                     f"Finalicé la vigilancia para tu hogar."
                 )
@@ -61,13 +65,14 @@ async def on_message(message):
                 await dm_channel.send(
                     f"Ya me encuentro monitoreando tu hogar y no puedo abrir otra sesión. Si deseas terminar la actual, escribe \"finalizar\" o \"terminé\"."
                 )
+            return
         except:
             print("Comprobamos que el usuario no tiene vigilancia activa.")
         if ip_a_vigilar:
             await dm_channel.send(
                 f"Hola {message.author.name}. Con gusto monitoreo tu hogar."
             )
-            asyncio.create_task(vigilar(ip_a_vigilar, message.author.id))
+            tasks_for_users[message.author.id] = asyncio.create_task(vigilar(ip_a_vigilar, message.author.id))
         else:
             await dm_channel.send("No encontré una IP válida en tu mensaje.")
     except discord.Forbidden:
@@ -119,7 +124,7 @@ def cv2discordfile(img):
 
 # Variables globales para control de notificaciones
 ultima_notificacion_por_usuario = {}
-intervalo_min_notificacion = timedelta(minutes=1)
+intervalo_min_notificacion = timedelta(seconds=30)
 
 async def vigilar(video_ip, user_id):
     tasked_by_users.append(user_id)
@@ -222,6 +227,7 @@ async def vigilar(video_ip, user_id):
         ret, frame_actual_orig = cap.read()
         if not ret:
             print("Se terminó el stream de video o hubo un error.")
+            await notificar(user_id=user_id, text="Se desconectó la cámara.", image=imagery["warn"])
             break
 
         if RESIZE_WIDTH:
@@ -338,6 +344,11 @@ async def vigilar(video_ip, user_id):
         # Lógica de estado general y texto
         if person_confirmed_in_current_processing_iteration:
             cv2.putText(frame_display, "Persona (Detectada)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            ahora = datetime.now()
+            ultima_not = ultima_notificacion_por_usuario.get(user_id)
+            if ultima_not is None or ahora - ultima_not > intervalo_min_notificacion:
+                await notificar(user_id=user_id, text="Se ha detectado a la siguiente persona en movimiento.", image=frame_con_silueta_para_historial)
+                ultima_notificacion_por_usuario[user_id] = ahora
             persona_detectada_previamente = True
         elif not perform_full_processing_now and hay_movimiento_general and last_known_puntos_silueta_display is not None:
             # Estamos en un frame saltado pero siguiendo a alguien visualmente
@@ -370,6 +381,7 @@ async def vigilar(video_ip, user_id):
             if ultima_not is None or ahora - ultima_not > intervalo_min_notificacion:
                 await notificar(user_id=user_id, text="¿Has visto a esta persona antes? Está parado enfrente de tu casa.", image=last_detected_face_img)
                 ultima_notificacion_por_usuario[user_id] = ahora
+                last_detected_face_img = None
 
         # Procesar historial para trayectoria
         if len(historial_deteccion) >= max_frames_in_history:
